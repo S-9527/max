@@ -32,6 +32,7 @@ where
 
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (async, cancel)
+import Control.Exception (fromException)
 import Control.Concurrent.STM
   ( TVar,
     atomically,
@@ -40,9 +41,9 @@ import Control.Concurrent.STM
     readTVarIO,
     writeTVar,
   )
-import Control.Monad (forM_, unless, void, when)
-import Data.Aeson (Value, encode, object, withObject, (.=))
-import Data.Aeson.Types (Parser, parseMaybe)
+import Control.Monad (forM_, forever, unless, void, when)
+import Data.Aeson (Value, encode)
+import Data.Aeson.Types (Parser, parseMaybe, withObject, (.:))
 import Data.ByteString.Lazy qualified as LBS
 import Data.Int (Int64)
 import Data.Map.Strict (Map)
@@ -50,7 +51,7 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Time (NominalDiffTime, UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
+import Data.Time (NominalDiffTime, addUTCTime, diffUTCTime, getCurrentTime)
 import Effectful
 import Effectful.Log
 import Effectful.PostgreSQL (WithConnection)
@@ -78,6 +79,7 @@ import Max.Platform.Store.Endpoint
   )
 import Max.Platform.Store.Ingest
   ( CursorRecord (..),
+    IngestOptions (..),
     IngestResult (..),
     NewIngest (..),
     advanceIngestCursorCAS,
@@ -91,9 +93,14 @@ import Max.QQOfficial.Events
 import Max.QQOfficial.Gateway
 import Max.QQOfficial.Types
 import Max.Util (trySyncIO)
+import Network.WebSockets
+  ( CompressionOptions (NoCompression, PermessageDeflateCompression),
+    ConnectionOptions (connectionCompressionOptions),
+  )
 import Network.WebSockets qualified as WS
 import OneBot.Types (GroupId (..))
 import System.Timeout (timeout)
+import Wuss qualified as Wuss
 
 --------------------------------------------------------------------------------
 -- Runtime state
@@ -211,7 +218,7 @@ qqOfficialWorker runtime scheduler ingress = localDomain "qqofficial" $ do
             -- like an attack and will never succeed.  Stay up, stay quiet.
             logAttention "qqofficial gateway closed permanently; not reconnecting" $
               object ["close_code" .= code, "app_id" .= cfg.qoAppId]
-            forever (threadDelay fatalIdleMicros)
+            forever (liftIO (threadDelay fatalIdleMicros))
   go (resumeFromCursor stored)
 
 -- | Whether this session ended and how to pick the next one up.
@@ -245,30 +252,60 @@ runSession runtime account resume scheduler ingress = do
       http = qorHttpRuntime runtime
       cache = qorTokenCache runtime
   gatewayUrl <- liftIO (qqOfficialGatewayUrl http cfg cache)
-  case gatewayUrl >>= (either (Left . id) Right . gatewayConnectTarget) of
+  case gatewayUrl of
     Left err -> unavailable err
-    Right target -> do
-      token <- liftIO (currentToken http cfg cache)
-      case token of
-        Left err -> unavailable err
-        Right accessToken -> do
-          connected <- liftIO (trySyncIO (WS.connectTLS WS.defaultConnectionOptions target))
-          case connected of
-            Left err -> unavailable ("connect: " <> T.pack (show err))
-            Right conn -> do
-              handshaken <- liftIO (handshake cfg accessToken resume conn)
-              case handshaken of
-                Left err -> do
-                  liftIO (WS.close conn 1000 "max handshake failed")
-                  unavailable ("handshake: " <> err)
-                Right () -> do
-                  outcome <- receiveLoop runtime account resume scheduler ingress conn
-                  liftIO (WS.close conn 1000 "max session finished")
-                  pure outcome
+    Right url -> case gatewayConnectTarget url of
+      Nothing -> unavailable ("unusable QQ official gateway address: " <> url)
+      Just target -> do
+        token <- liftIO (currentToken http cfg cache)
+        case token of
+          Left err -> unavailable err
+          Right accessToken -> do
+            -- The gateway is @wss@, and the WebSocket library Max already uses
+            -- speaks plain @ws@ only, so the secure client comes from Wuss,
+            -- which wraps the same connection type.
+            connected <-
+              liftIO
+                ( trySyncIO
+                    (Wuss.newSecureClientConnectionWith
+                      (T.unpack target.gtHost)
+                      (fromIntegral target.gtPort)
+                      (T.unpack target.gtPath)
+                      (gatewayOptions target)
+                      []
+                    )
+                )
+            case connected of
+              Left err -> unavailable ("connect: " <> T.pack (show err))
+              Right (conn, finish) -> do
+                outcome <-
+                  do
+                    handshaken <- liftIO (handshake cfg accessToken resume conn)
+                    case handshaken of
+                      Left err -> unavailable ("handshake: " <> err)
+                      Right () -> receiveLoop runtime account resume scheduler ingress conn
+                -- Wuss hands back the connection with the action that closes the
+                -- channel it opened; the socket is not closed until that runs.
+                _ <- liftIO (trySyncIO finish)
+                pure outcome
   where
     unavailable err = do
       logAttention "qqofficial gateway unavailable" $ object ["error" .= err]
       pure (SessionEnded resume)
+
+-- | Socket options for one gateway address.
+--
+-- Compression is not a preference: the platform states in the address whether it
+-- will send deflated frames, so the socket answers the same way rather than
+-- negotiating.
+gatewayOptions :: GatewayTarget -> WS.ConnectionOptions
+gatewayOptions target =
+  WS.defaultConnectionOptions
+    { connectionCompressionOptions =
+        if target.gtDeflate
+          then PermessageDeflateCompression WS.defaultPermessageDeflate
+          else NoCompression
+    }
 
 -- | Identify starts a session; Resume reattaches to one the platform still
 -- remembers and asks it to replay what was missed.
@@ -302,33 +339,36 @@ receiveLoop runtime account resume scheduler ingress conn = do
   intervalRef <- liftIO (newTVarIO defaultHeartbeatMillis)
   seqRef <- liftIO (newTVarIO (snd <$> resume))
   -- The resume point this session has reached, whatever the next attempt needs.
-  pointRef <- liftIO (newTVarIO resume)
+  -- The cell is layered: outside is whether anything was learned at all, inside
+  -- is the point, which is what @fromMaybe@ reads.
+  pointRef <- liftIO (newTVarIO (Just resume))
   pump <- liftIO (async (heartbeatLoop conn intervalRef seqRef))
+  -- The loop reads the cells the do block above created, so it is bound with
+  -- @let@ rather than @where@: a @where@ clause cannot see them.
+  let loop = do
+        received <- liftIO (receiveFrame conn)
+        case received of
+          Right Nothing -> loop
+          Right (Just frame) -> handleFrame runtime account resume scheduler ingress conn intervalRef seqRef pointRef frame >>= \case
+            ContinueLoop -> loop
+            StopLoop outcome -> pure outcome
+          Left (GatewayClosed code) -> do
+            logInfo "qqofficial gateway closed" $ object ["close_code" .= code]
+            case closeRecovery code of
+              RecoveryResume -> do
+                point <- liftIO (readTVarIO pointRef)
+                pure (SessionEnded (fromMaybe resume point))
+              RecoveryIdentify -> pure (SessionEnded Nothing)
+              RecoveryFatal -> pure (SessionFatal code)
+          Left (GatewayFailed err) -> do
+            -- A dropped socket is the ordinary case for a long-lived connection;
+            -- the resume point is what makes the next attempt lossless.
+            logAttention "qqofficial gateway read failed" $ object ["error" .= err]
+            point <- liftIO (readTVarIO pointRef)
+            pure (SessionEnded (fromMaybe resume point))
   outcome <- loop
   liftIO (cancel pump)
   pure outcome
-  where
-    loop = do
-      received <- liftIO (receiveFrame conn)
-      case received of
-        Right Nothing -> loop
-        Right (Just frame) -> handleFrame runtime account scheduler ingress conn intervalRef seqRef pointRef frame >>= \case
-          ContinueLoop -> loop
-          StopLoop outcome -> pure outcome
-        Left (GatewayClosed code) -> do
-          logInfo "qqofficial gateway closed" $ object ["close_code" .= code]
-          case closeRecovery code of
-            RecoveryResume -> do
-              point <- liftIO (readTVarIO pointRef)
-              pure (SessionEnded (fromMaybe resume point))
-            RecoveryIdentify -> pure (SessionEnded Nothing)
-            RecoveryFatal -> pure (SessionFatal code)
-        Left (GatewayFailed err) -> do
-          -- A dropped socket is the ordinary case for a long-lived connection;
-          -- the resume point is what makes the next attempt lossless.
-          logAttention "qqofficial gateway read failed" $ object ["error" .= err]
-          point <- liftIO (readTVarIO pointRef)
-          pure (SessionEnded (fromMaybe resume point))
 
 data GatewayEnd
   = -- | The peer closed with a code.
@@ -343,29 +383,29 @@ data GatewayEnd
 -- the platform's own replay can close.
 receiveFrame :: WS.Connection -> IO (Either GatewayEnd (Maybe GatewayFrame))
 receiveFrame conn = do
-  attempt <- trySyncIO (timeout idleWaitMicros (WS.receiveData conn))
+  attempt <- trySyncIO (timeout idleWaitMicros (WS.receiveData conn :: IO LBS.ByteString))
   case attempt of
-    Left err -> pure (GatewayFailed (T.pack (show err)))
+    Left err -> pure (classifyRead err)
+    -- Nothing means the platform said nothing for a whole interval.  That is not
+    -- a failure: the heartbeat still runs and the next read waits again.
     Right Nothing -> pure (Right Nothing)
-    Right (Just (message, _)) -> pure (interpret message)
+    Right (Just payload) -> pure $ case parseGatewayFrame (LBS.toStrict payload) of
+      Right frame -> Right (Just frame)
+      Left _ -> Right Nothing
   where
-    interpret = \case
-      WS.Text_ payload _ -> decoded (LBS.toStrict payload)
-      WS.Binary_ payload _ -> decoded payload
-      WS.Close_ code _ -> pure (Left (GatewayClosed (fromIntegral (WS.closeCode code))))
-      -- The library answers pings for us; a bare pong needs nothing.
-      WS.Ping_ _ -> pure (Right Nothing)
-      WS.Pong_ _ -> pure (Right Nothing)
-    decoded payload = case parseGatewayFrame payload of
-      Right frame -> pure (Right (Just frame))
-      Left _ -> pure (Right Nothing)
+    -- The library owns the close handshake, so a close arrives as an exception
+    -- rather than as a value; its code is what decides how the next attempt
+    -- picks the session up.
+    classifyRead err = case fromException err of
+      Just (WS.CloseRequest code _) -> Left (GatewayClosed (fromIntegral code))
+      _ -> Left (GatewayFailed (T.pack (show err)))
 
 -- | Heartbeat on the period the gateway asked for, carrying the last sequence
 -- number this connection handled.
 heartbeatLoop :: WS.Connection -> TVar Int -> TVar (Maybe Int64) -> IO ()
 heartbeatLoop conn intervalRef seqRef = forever $ do
   millis <- readTVarIO intervalRef
-  threadDelay (fromIntegral millis * 1000)
+  threadDelay (millis * 1000)
   seqNo <- readTVarIO seqRef
   void (trySyncIO (WS.sendTextData conn (encode (heartbeatPayload seqNo))))
 
@@ -373,17 +413,20 @@ handleFrame ::
   (WithConnection :> es, Log :> es, IOE :> es) =>
   QQOfficialRuntime ->
   PlatformAccountId ->
+  -- | Where this session started, used when the session has not moved the point
+  -- any further and a close still has to name where to resume from.
+  Maybe (Text, Int64) ->
   Maybe EpisodeScheduler ->
   Ingress ->
   WS.Connection ->
   TVar Int ->
   TVar (Maybe Int64) ->
-  TVar (Maybe (Text, Int64)) ->
+  TVar (Maybe (Maybe (Text, Int64))) ->
   GatewayFrame ->
   Eff es LoopControl
-handleFrame runtime account scheduler ingress conn intervalRef seqRef pointRef frame = case frame.frameOp of
+handleFrame runtime account resume scheduler ingress conn intervalRef seqRef pointRef frame = case frame.frameOp of
   10 -> do
-    liftIO (writeTVar intervalRef (fromMaybe defaultHeartbeatMillis (frame.frameHeartbeatMillis frame)))
+    liftIO (atomically (writeTVar intervalRef (fromMaybe defaultHeartbeatMillis frame.frameHeartbeatMillis)))
     pure ContinueLoop
   11 -> pure ContinueLoop -- heartbeat acknowledged
   1 -> do
@@ -405,20 +448,20 @@ handleFrame runtime account scheduler ingress conn intervalRef seqRef pointRef f
       (Just "READY", _) -> handleReady
       (Just "RESUMED", _) -> do
         logInfo "qqofficial gateway session resumed" $ object ["seq" .= frame.frameSeq]
-        liftIO (writeTVar seqRef frame.frameSeq)
+        liftIO (atomically (writeTVar seqRef frame.frameSeq))
         recordPoint runtime account Nothing frame.frameSeq
         pure ContinueLoop
       (Just name, seqNo)
         | qqOfficialMessageEvent name -> do
             ctx <- liftIO (readTVarIO (qorContext runtime))
             ingestMessage runtime scheduler ingress ctx name frame.frameData
-            liftIO (writeTVar seqRef seqNo)
+            liftIO (atomically (writeTVar seqRef seqNo))
             recordPoint runtime account Nothing seqNo
             pure ContinueLoop
       _ -> do
         -- Every dispatch advances the point, including the ones this adapter
         -- ignores: a resume must not replay them.
-        liftIO (writeTVar seqRef frame.frameSeq)
+        liftIO (atomically (writeTVar seqRef frame.frameSeq))
         recordPoint runtime account Nothing frame.frameSeq
         pure ContinueLoop
 
@@ -427,10 +470,10 @@ handleFrame runtime account scheduler ingress conn intervalRef seqRef pointRef f
         logAttention "qqofficial ready frame carried no session" $ object ["seq" .= frame.frameSeq]
         pure ContinueLoop
       Just (session, userId, username) -> do
-        liftIO $ do
+        liftIO . atomically $ do
           writeTVar seqRef frame.frameSeq
-          writeTVar pointRef (Just (session, fromMaybe 0 frame.frameSeq))
-          when (isJust userId) (updateContext runtime userId username)
+          writeTVar pointRef (Just (Just (session, fromMaybe 0 frame.frameSeq)))
+        when (isJust userId) (liftIO (updateContext runtime userId username))
         recordPoint runtime account (Just session) frame.frameSeq
         logInfo "qqofficial gateway ready" $
           object ["session" .= session, "seq" .= frame.frameSeq, "bot" .= username]
@@ -442,14 +485,17 @@ handleFrame runtime account scheduler ingress conn intervalRef seqRef pointRef f
 updateContext :: QQOfficialRuntime -> Maybe Text -> Maybe Text -> IO ()
 updateContext runtime userId username = do
   current <- readTVarIO (qorContext runtime)
-  let selfIds = maybe (ctxSelfIds current) (\value -> [value | value <- [cfgId, value], not (T.null value)])
-        cfgId = ctxSelfId current
-  writeTVar
-    (qorContext runtime)
-    current
-      { ctxSelfIds = selfIds,
-        ctxSelfLabel = fromMaybe (ctxSelfLabel current) username
-      }
+  -- The bot identifies itself by the open platform's user id, which is not the
+  -- application id; both are accepted so an echo matches either way.
+  let cfgId = ctxSelfId current
+      selfIds = maybe (ctxSelfIds current) (\value -> [self | self <- [cfgId, value], not (T.null self)]) userId
+  atomically $
+    writeTVar
+      (qorContext runtime)
+      current
+        { ctxSelfIds = selfIds,
+          ctxSelfLabel = fromMaybe (ctxSelfLabel current) username
+        }
 
 -- | Persist the resume point.
 --
@@ -481,7 +527,9 @@ recordPoint runtime account session seqNo = do
   where
     sessionOf = \case
       Nothing -> ""
-      Just record -> fromMaybe "" (parseMaybe (withObject "qqofficial cursor" (.: "session_id" :: Parser Text)) record.cursor)
+      Just record -> case record.cursor of
+        PlatformCursor value ->
+          fromMaybe "" (parseMaybe (withObject "qqofficial cursor" (\o -> o .: "session_id" :: Parser Text)) value)
 
 ingestMessage ::
   (WithConnection :> es, Log :> es, IOE :> es) =>
@@ -628,11 +676,13 @@ qqOfficialDeliveryTransport runtime =
                   partWindow = if index == 0 then window else Nothing
                 }
 
-    sendPart runtime kind openid _index part = do
-      seqNo <- case part.partWindow of
-        Just window -> Just <$> nextMsgSeq runtime window.passiveMsgId
+    sendPart _runtime kind openid _index part = do
+      -- The sequence number is claimed once per part and only when there is a
+      -- window to answer inside: two answers to one message must differ.
+      passive <- case part.partWindow of
         Nothing -> pure Nothing
-      attempt <- sendOnce runtime kind openid part (part.partWindow >>= \w -> Just (w.passiveMsgId, seqNo))
+        Just window -> Just . (window.passiveMsgId,) <$> nextMsgSeq runtime window.passiveMsgId
+      attempt <- sendOnce runtime kind openid part passive
       case attempt of
         Right send -> pure (AttemptConfirmed (NativeEventId <$> send.sentRefIndex))
         Left failure -> case (part.partWindow, failure) of
@@ -659,7 +709,9 @@ sendOnce ::
   ConversationKind ->
   Text ->
   OutgoingPart ->
-  Maybe (Text, Maybe Int) ->
+  -- | The @msg_id@ being answered and the sequence number this send claims,
+  -- together; 'Nothing' sends as an ordinary message instead of a passive answer.
+  Maybe (Text, Int) ->
   IO (Either QQOfficialFailure QQOfficialSend)
 sendOnce runtime kind openid part passive =
   sendQQOfficialMessage

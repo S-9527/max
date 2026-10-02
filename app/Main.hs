@@ -167,9 +167,7 @@ main = do
                   <> [matrixDeliveryTransport httpRuntime matrixCfg | matrixCfg <- maybeToList cfg.matrix]
                   <> [iMessageDeliveryTransport httpRuntime iMessageCfg | iMessageCfg <- maybeToList cfg.imessage]
                   <> [oneBotDeliveryTransport httpRuntime PlatformWeChatHook backend | backend <- foreignEdges]
-                  <> [ qqOfficialDeliveryTransport runtime
-                     | (cfg.qqofficial, Just runtime) <- [(cfg.qqofficial, qqRuntime)]
-                     ]
+                  <> [qqOfficialDeliveryTransport runtime | runtime <- maybeToList qqRuntime]
           -- Owners configured as openids are translated into the numeric ids the
           -- message store keys by, once, before anything reads them.
           qqOwners <- runEff . runWithConnectionPool pool $
@@ -257,7 +255,7 @@ main = do
             . runPlatforms qqEdge foreignEdges
             . runRuntimeEmbedding (pure (newEmbedClient httpRuntime <$> cfg.embedding))
             . runAgentRuntime jobs defaultLimits (allToolsFor httpRuntime env)
-            $ runApp httpRuntime cfg deliveryTransports applied eventQ fetchSig intentState logBuf clientRef mainTid
+            $ runApp httpRuntime cfg qqRuntime deliveryTransports applied eventQ fetchSig intentState logBuf clientRef mainTid
       )
       `finally` destroyAllBrowsers browsers
 
@@ -292,6 +290,9 @@ runApp ::
   ) =>
   HttpRuntime ->
   AppConfig ->
+  -- | The QQ official adapter's own state, when that platform is configured; it
+  -- owns one gateway session and both sides of delivery share it.
+  Maybe QQOfficialRuntime ->
   [DeliveryTransport] ->
   [String] ->
   TQueue Event ->
@@ -302,7 +303,7 @@ runApp ::
   -- | Main thread, for 'drainWorker' to interrupt once drained.
   ThreadId ->
   Eff es ()
-runApp httpRuntime cfg deliveryTransports applied eventQ fetchSig intentState logBuf clientRef mainTid =
+runApp httpRuntime cfg qqRuntime deliveryTransports applied eventQ fetchSig intentState logBuf clientRef mainTid =
   -- WebSocket callbacks run on new threads; their effect unlift must support
   -- cross-thread use throughout the process lifetime.
   withUnliftStrategy (ConcUnlift Persistent Unlimited) $ do
@@ -402,7 +403,7 @@ runApp httpRuntime cfg deliveryTransports applied eventQ fetchSig intentState lo
                | iMessageCfg <- maybeToList cfg.imessage
                ]
             <> [ worker "qqofficial" RequiredWorker (recovering "qqofficial gateway" (qqOfficialWorker runtime env.beEpisodeScheduler env.beIngress))
-               | (cfg.qqofficial, Just runtime) <- [(cfg.qqofficial, qqRuntime)]
+               | runtime <- maybeToList qqRuntime
                ]
 
         sandboxGc = forever $ do

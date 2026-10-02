@@ -409,7 +409,7 @@ ensurePlatformAccount ::
   NativeAccountId ->
   OutboundCaps ->
   Eff es PlatformAccountId
-ensurePlatformAccount platform nativeAccount capabilities = do
+ensurePlatformAccount platform (NativeAccountId nativeAccount) capabilities = do
   rows <-
     query
       "INSERT INTO platform_accounts (platform, native_account_id, capabilities) \

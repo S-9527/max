@@ -1,13 +1,14 @@
 module Max.QQOfficialSpec (spec) where
 
-import Data.Aeson (Value, object, withObject, (.=))
-import Data.Aeson.Types (parseEither)
+import Data.Aeson (Value (..), object, (.=))
+import Data.Aeson.Types (Pair, parseEither, withObject, (.:))
 import Data.Either (isLeft)
 import Data.Int (Int64)
-import Data.Maybe (mapMaybe)
+import Data.Maybe (isJust, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Time (UTCTime, toGregorian, timeOfDay)
+import Data.Time (UTCTime)
+import Data.Time.Format (defaultTimeLocale, formatTime)
 import Max.DB.PlatformIds (toQQPrivateChatRange)
 import Max.IR
 import Max.IR.Lower (OutboundCaps (..), Tier (..))
@@ -79,39 +80,38 @@ c2cEvent =
             "username" .= ("小红" :: Text),
             "bot" .= False
           ],
-      "message_scene" .= object ["ext" .= ["msg_idx=REFIDX_c2c=="]]
+      "message_scene" .= object ["ext" .= (["msg_idx=REFIDX_c2c=="] :: [Text])]
     ]
 
 groupAtMentionEvent :: Value
 groupAtMentionEvent =
-  groupAtEvent
-    <> object
-      [ "mentions" .= [object ["member_openid" .= ("MEMBEROPENID2" :: Text), "username" .= ("小红" :: Text)]]
-    ]
+  withFields
+    groupAtEvent
+    ["mentions" .= [object ["member_openid" .= ("MEMBEROPENID2" :: Text), "username" .= ("小红" :: Text)]]]
 
 groupAtVoiceEvent :: Value
 groupAtVoiceEvent =
-  groupAtEvent
-    <> object
-      [ "attachments"
-          .= [ object
-                 [ "content_type" .= ("voice" :: Text),
-                   "url" .= ("https://multimedia.example/download?rkey=x" :: Text),
-                   "voice_wav_url" .= ("https://multimedia.example/wav?rkey=x" :: Text),
-                   "size" .= (2048 :: Int),
-                   "asr_refer_text" .= ("今天真热" :: Text)
-                 ]
-             ]
-      ]
+  withFields
+    groupAtEvent
+    [ "attachments"
+        .= [ object
+               [ "content_type" .= ("voice" :: Text),
+                 "url" .= ("https://multimedia.example/download?rkey=x" :: Text),
+                 "voice_wav_url" .= ("https://multimedia.example/wav?rkey=x" :: Text),
+                 "size" .= (2048 :: Int),
+                 "asr_refer_text" .= ("今天真热" :: Text)
+               ]
+           ]
+    ]
 
 groupAtQuoteEvent :: Value
 groupAtQuoteEvent =
-  groupAtEvent
-    <> object
-      [ "message_type" .= (103 :: Int),
-        "message_scene"
-          .= object ["ext" .= ["msg_idx=REFIDX_quote==", "ref_msg_idx=REFIDX_target=="]]
-      ]
+  withFields
+    groupAtEvent
+    [ "message_type" .= (103 :: Int),
+      "message_scene"
+        .= object ["ext" .= (["msg_idx=REFIDX_quote==", "ref_msg_idx=REFIDX_target=="] :: [Text])]
+    ]
 
 ownMessageEvent :: Value
 ownMessageEvent =
@@ -128,33 +128,48 @@ ownMessageEvent =
             "username" .= ("小鲨" :: Text),
             "bot" .= True
           ],
-      "message_scene" .= object ["ext" .= ["msg_idx=REFIDX_own=="]]
+      "message_scene" .= object ["ext" .= (["msg_idx=REFIDX_own=="] :: [Text])]
     ]
 
 otherBotEvent :: Value
 otherBotEvent =
-  ownMessageEvent
-    <> object
-      [ "author"
-          .= object
-            [ "id" .= ("OTHERBOT" :: Text),
-              "member_openid" .= ("OTHERBOT" :: Text),
-              "username" .= ("别的机器人" :: Text),
-              "bot" .= True
-            ]
-      ]
+  withFields
+    ownMessageEvent
+    [ "author"
+        .= object
+          [ "id" .= ("OTHERBOT" :: Text),
+            "member_openid" .= ("OTHERBOT" :: Text),
+            "username" .= ("别的机器人" :: Text),
+            "bot" .= True
+          ]
+    ]
 
 compositeEvent :: Value
 compositeEvent =
-  groupAtEvent
-    <> object
-      [ "message_type" .= (102 :: Int),
-        "content" .= (" " :: Text),
-        "msg_elements"
-          .= [ object ["content" .= ("a" :: Text)],
-               object ["content" .= ("b" :: Text)]
-             ]
-      ]
+  withFields
+    groupAtEvent
+    [ "message_type" .= (102 :: Int),
+      "content" .= (" " :: Text),
+      "msg_elements"
+        .= [ object ["content" .= ("a" :: Text)],
+             object ["content" .= ("b" :: Text)]
+           ]
+    ]
+
+-- | One fixture patched with extra fields.  Aeson has no 'Semigroup' for
+-- 'Value', and naming the fields a variant changes reads better than repeating
+-- the whole event.
+withFields :: Value -> [Pair] -> Value
+withFields base extra = case (base, object extra) of
+  (Object a, Object b) -> Object (a <> b)
+  _ -> base
+
+-- | Why the adapter refused a group payload, if it did.  An event has no 'Show'
+-- instance, so a refusal is observed through the message instead.
+refusal :: Value -> Maybe Text
+refusal payload = case qqOfficialEvent ctx "GROUP_AT_MESSAGE_CREATE" payload of
+  Left err -> Just err
+  Right _ -> Nothing
 
 parseQQOfficial :: Text -> Value -> IO QQOfficialEvent
 parseQQOfficial name payload = case qqOfficialEvent ctx name payload of
@@ -176,16 +191,16 @@ captionsIn = mapMaybe $ \case
   NMedia _ meta -> meta.description
   _ -> Nothing
 
-utcDay :: UTCTime -> (Int, Int, Int, Int, Int, Int)
-utcDay t =
-  let (year, month, day) = toGregorian t
-      (hour, minute, second) = timeOfDay t
-   in (year, month, day, hour, minute, second)
+-- | Rendered in UTC.  What these tests are about is what the platform's own
+-- offset does to the instant, so the assertion reads in the same zone the
+-- protocol normalises to.
+utcStamp :: UTCTime -> String
+utcStamp = formatTime defaultTimeLocale "%Y-%m-%d %H:%M:%S"
 
 -- | Hspec's @shouldNotContain@ works on lists; this asks the question a reader
 -- actually has, which is whether the rendered text carries the secret anywhere.
-shouldNotContain :: String -> String -> Expectation
-shouldNotContain haystack needle =
+shouldNotCarry :: String -> String -> Expectation
+shouldNotCarry haystack needle =
   (T.isInfixOf (T.pack needle) (T.pack haystack)) `shouldBe` False
 
 spec :: Spec
@@ -217,11 +232,11 @@ spec = do
 
   describe "QQ official timestamps" $ do
     it "applies the offset the platform sends" $
-      fmap utcDay (qqOfficialTimestamp "2026-07-21T08:00:00+08:00")
-        `shouldBe` Right (2026, 7, 21, 0, 0, 0)
+      fmap utcStamp (qqOfficialTimestamp "2026-07-21T08:00:00+08:00")
+        `shouldBe` Right "2026-07-21 00:00:00"
 
     it "accepts a Z zone and fractional seconds" $
-      fmap utcDay (qqOfficialTimestamp "2026-07-21T00:00:00.123Z") `shouldBe` Right (2026, 7, 21, 0, 0, 0)
+      fmap utcStamp (qqOfficialTimestamp "2026-07-21T00:00:00.123Z") `shouldBe` Right "2026-07-21 00:00:00"
 
     it "refuses to guess when the timestamp is unreadable" $ do
       qqOfficialTimestamp "" `shouldSatisfy` isLeft
@@ -254,12 +269,19 @@ spec = do
           parts = [[NText "a"], [NText "b"]]
       mergeChunksToBudget 5 parts `shouldBe` parts
 
+    it "folds only the surplus, leaving the rest as max planned it" $ do
+      -- Merging everything would satisfy the budget too, but it would replace
+      -- Max's byte-budget chunking with one long message.
+      let parts :: [[Node 'Lowered]]
+          parts = [[NText "a"], [NText "b"], [NText "c"], [NText "d"], [NText "e"], [NText "f"]]
+      mergeChunksToBudget 5 parts `shouldBe` [[NText "ab"], [NText "c"], [NText "d"], [NText "e"], [NText "f"]]
+
     it "never folds a native media part into its neighbour" $ do
       -- One media part is one message on this platform, so folding two of them
       -- together would produce a message carrying two attachments where the API
       -- takes a single file_info.
       let media :: Node 'Lowered
-          media = NMedia (mediaBlobRef (replicate 64 'a')) (MediaMeta MImage Nothing Nothing Nothing Nothing Nothing)
+          media = NMedia (ResolvedUrl "https://example.test/a.png") (MediaMeta MImage Nothing Nothing Nothing Nothing Nothing)
           parts :: [[Node 'Lowered]]
           parts = [[NText "a"], [media], [NText "b"]]
       length (mergeChunksToBudget 1 parts) `shouldBe` 3
@@ -308,9 +330,17 @@ spec = do
       parseEither (withObject "resume" (\o -> o .: "seq")) (resumePayload "TOKEN" "session-1" 99)
         `shouldBe` Right (99 :: Int64)
 
-    it "turns the address into a connect target" $ do
-      gatewayConnectTarget "wss://api.bot.qq.com/websocket/" `shouldBe` Just "api.bot.qq.com:443/websocket/"
+    it "splits the address into what the socket needs" $ do
+      gatewayConnectTarget "wss://api.bot.qq.com/websocket/"
+        `shouldBe` Just (GatewayTarget "api.bot.qq.com" 443 "/websocket/" False)
+      -- The platform asks for compression in the address itself.
+      gatewayConnectTarget "wss://api.sgroup.qq.com/websocket?compress=zlib&v=2"
+        `shouldBe` Just (GatewayTarget "api.sgroup.qq.com" 443 "/websocket?compress=zlib&v=2" True)
       gatewayConnectTarget "http://api.bot.qq.com/websocket" `shouldBe` Nothing
+      -- The secure client cannot speak plaintext, so a ws:// address is refused
+      -- here rather than at the handshake.
+      gatewayConnectTarget "ws://api.bot.qq.com/websocket" `shouldBe` Nothing
+      gatewayConnectTarget "wss://api.bot.qq.com:443/websocket" `shouldBe` Nothing
 
     it "decides what a close code means for the next attempt" $ do
       closeRecovery 4009 `shouldBe` RecoveryResume -- connection expired
@@ -384,7 +414,7 @@ spec = do
       event.qoeContent `shouldBe` [NMention (NativeUserId "1020000001") "小鲨", NText "a", NText "b"]
 
     it "refuses an event that names no conversation" $
-      qqOfficialEvent ctx "GROUP_AT_MESSAGE_CREATE" (object ["id" .= ("x" :: Text)]) `shouldSatisfy` isLeft
+      refusal (object ["id" .= ("x" :: Text)]) `shouldSatisfy` isJust
 
   describe "QQ official send plans" $ do
     it "sends text with a quote" $ do
@@ -411,7 +441,7 @@ spec = do
 
   describe "QQ official configuration" $ do
     it "never renders the app secret" $
-      show cfg `shouldNotContain` "super-secret-value"
+      show cfg `shouldNotCarry` "super-secret-value"
 
     it "reports the owner count instead of the openids" $
       show cfg `shouldContain` "1 openid(s)"

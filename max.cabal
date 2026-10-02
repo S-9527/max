@@ -525,6 +525,9 @@ library
         , wai                 >= 3.2  && < 3.3
         , warp                >= 3.3  && < 3.5
         , websockets          >= 0.13 && < 0.14
+        -- The QQ open platform gateway is wss://, and websockets 0.13 speaks
+        -- plain ws:// only; wuss is the secure client for that connection type.
+        , wuss                >= 2.0  && < 2.1
 
 executable max
     import:           warnings, lang

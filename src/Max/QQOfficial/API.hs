@@ -25,10 +25,10 @@ module Max.QQOfficial.API
 where
 
 import Control.Concurrent.STM (TVar, atomically, newTVarIO, readTVar, writeTVar)
-import Data.Aeson (Value (..), eitherDecodeStrict', encode, object, withObject, (.=))
+import Data.Aeson (Value (..), eitherDecodeStrict', encode, object, (.=))
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
-import Data.Aeson.Types (Parser, parseEither)
+import Data.Aeson.Types (Parser, parseEither, withObject, (.:), (.:?), (.!=))
 import Data.ByteString qualified as BS
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -39,6 +39,7 @@ import Max.HttpRuntime
   ( HttpPool (StandardPool),
     HttpRuntime,
     TransportFailure (..),
+    body,
     parseRequestEither,
     pathPiece,
     renderTransportFailure,
@@ -105,6 +106,7 @@ fetchToken runtime cfg =
               }
   where
     body = object ["appId" .= cfg.qoAppId, "clientSecret" .= cfg.qoAppSecret]
+    tokenParser :: Value -> Parser (Text, Int)
     tokenParser = withObject "access token" $ \o -> do
       token <- o .: "access_token" :: Parser Text
       -- Documented as "at most 7200"; a platform that reports less is obeyed
@@ -121,7 +123,7 @@ qqOfficialGatewayUrl runtime cfg cache =
     Right token ->
       apiRequest runtime cfg (Just token) "GET" ("/gateway/bot" :: Text) Nothing >>= \case
         Left failure -> pure (Left (renderTransportFailure failure))
-        Right value -> case parseEither (withObject "gateway" (.: "url" :: Parser Text)) value of
+        Right value -> case parseEither (withObject "gateway" (\o -> o .: "url" :: Parser Text)) value of
           Left err -> pure (Left ("QQ official gateway response: " <> T.pack err))
           Right url -> pure (Right url)
 
@@ -247,7 +249,7 @@ sendPath kind openid = case kind of
   ConversationGroup -> "/v2/groups/" <> pathPiece openid <> "/messages"
   ConversationDirect -> "/v2/users/" <> pathPiece openid <> "/messages"
 
-sendParser :: Parser QQOfficialSend
+sendParser :: Value -> Parser QQOfficialSend
 sendParser = withObject "send response" $ \o -> do
   messageId <- o .:? "id" .!= ("" :: Text)
   reference <- o .:? "ext_info" >>= \case
@@ -265,7 +267,7 @@ renderPlan mMsgId plan =
       <> ["media" .= object ["file_info" .= fileInfo] | Just fileInfo <- [planMediaFileInfo plan]]
       <> ["message_reference" .= object ["message_id" .= reference] | Just reference <- [planReference plan]]
       <> ["msg_id" .= messageId | Just messageId <- [mMsgId]]
-      <> ["msg_seq" .= seq | Just seq <- [planMsgSeq plan]]
+      <> ["msg_seq" .= msgSeq | Just msgSeq <- [planMsgSeq plan]]
 
 -- | One HTTPS round trip against the open platform.
 --

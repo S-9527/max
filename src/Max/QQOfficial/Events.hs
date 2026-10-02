@@ -24,17 +24,17 @@ module Max.QQOfficial.Events
 where
 
 import Control.Applicative ((<|>))
-import Data.Aeson (Object, Value (..), parseMaybe, withObject)
+import Data.Aeson (Value (..))
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
-import Data.Aeson.Types (Parser)
+import Data.Aeson.Types (Parser, parseMaybe, withObject, (.:?), (.!=))
 import Data.Int (Int64)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Time (LocalTime, UTCTime, defaultTimeLocale, localTimeToUTC, minutesToTimeZone, parseTimeM)
+import Data.Time (UTCTime, defaultTimeLocale, localTimeToUTC, minutesToTimeZone, parseTimeM)
 import Max.IR
 import Max.Platform.Types
   ( ConversationKind (..),
@@ -87,7 +87,7 @@ qqOfficialEvent ctx name raw = case (parseMaybe eventParser raw, parseMaybe scen
     build event scene = do
       occurredAt <- qqOfficialTimestamp event.timestamp
       let author = event.author
-          sender = firstJust [stringField "member_openid" author, stringField "user_openid" author, stringField "id" author]
+          sender = fromMaybe "" (firstJust [stringField "member_openid" author, stringField "user_openid" author, stringField "id" author])
           isSelf = objectField "bot" author == Just (Bool True) && sender `elem` ctxSelfIds ctx
           -- The platform strips the leading @-bot@ from a group at-message body
           -- and its @mentions@ list explicitly excludes the bot, so without this
@@ -143,7 +143,9 @@ data RawEvent = RawEvent
     timestamp :: !Text
   }
 
-eventParser :: Parser RawEvent
+-- | @parseMaybe@ takes a @Value -> Parser@ function, so each of these states its
+-- own name rather than relying on the caller to apply it.
+eventParser :: Value -> Parser RawEvent
 eventParser = withObject "message event" $ \o -> do
   messageId <- o .:? "id" .!= ("" :: Text)
   author <- o .:? "author" .!= Object mempty
@@ -177,7 +179,7 @@ eventParser = withObject "message event" $ \o -> do
 
 -- | @message_scene@ is the only place a group message's referenceable index
 -- lives, and its @ext@ is a list of @key=value@ strings rather than an object.
-sceneParser :: Parser (Map Text Text)
+sceneParser :: Value -> Parser (Map Text Text)
 sceneParser = withObject "message scene" $ \o -> do
   scene <- o .:? "message_scene" .!= Object mempty
   ext <- withObject "message scene" (\s -> s .:? "ext" .!= ([] :: [Value])) scene
@@ -223,7 +225,7 @@ elementNodes element = case parseMaybe elementParser element of
         <> attachmentNodes attachments
         <> concatMap elementNodes children
 
-elementParser :: Parser (Int, Text, Maybe Value, [Value], [Value])
+elementParser :: Value -> Parser (Int, Text, Maybe Value, [Value], [Value])
 elementParser = withObject "msg element" $ \o -> do
   messageType <- o .:? "message_type" .!= (0 :: Int)
   content <- o .:? "content" .!= ("" :: Text)
@@ -254,9 +256,9 @@ cardFromArk ark =
     }
   where
     fields = arkObject "fields" ark
-    fieldsText name = nonBlank =<< arkText name fields
-    arkText name = nonBlank (fromMaybe "" (objectField name ark))
-    orElse (Just value) Nothing = Just value
+    fieldsText name = nonBlank =<< (stringField name =<< fields)
+    arkText name = nonBlank =<< stringField name ark
+    orElse (Just value) _ = Just value
     orElse Nothing fallback = fallback
 
 arkObject :: Text -> Value -> Maybe Value
@@ -266,11 +268,12 @@ arkObject name value = case value of
     _ -> Nothing
   _ -> Nothing
 
+-- | Any field of an object, whatever its type.  Callers that want text go
+-- through 'stringField'; the ark card fields nest an object under @fields@,
+-- which this is the only reader that has to reach.
 objectField :: Text -> Value -> Maybe Value
 objectField name value = case value of
-  Object fields -> case KeyMap.lookup (Key.fromText name) fields of
-    Just (String text) -> Just text
-    _ -> Nothing
+  Object fields -> KeyMap.lookup (Key.fromText name) fields
   _ -> Nothing
 
 -- | Inbound media.  The download URL carries a short-lived signature and stops
@@ -285,18 +288,21 @@ attachmentNodes attachments = mapMaybe node attachments
   where
     node attachment = do
       contentType <- stringField "content_type" attachment
-      ref <- firstJust [stringField "url" attachment, stringField "voice_wav_url" attachment] >>= mediaRemoteRef
+      -- An ingest-phase media node holds the reference as a Maybe: an
+      -- attachment with no usable URL stays a media marker instead of vanishing.
+      let ref = firstJust [stringField "url" attachment, stringField "voice_wav_url" attachment] >>= mediaRemoteRef
       pure
-        NMedia
-          ref
-          MediaMeta
-            { kind = mediaKindFor contentType,
-              mime = nonBlank contentType,
-              sizeBytes = numberField "size" attachment,
-              name = nonBlank (fromMaybe "" (stringField "filename" attachment)),
-              description = nonBlank (fromMaybe "" (stringField "asr_refer_text" attachment)),
-              raw = Just attachment
-            }
+        ( NMedia
+            ref
+            MediaMeta
+              { kind = mediaKindFor contentType,
+                mime = nonBlank contentType,
+                sizeBytes = numberField "size" attachment,
+                name = nonBlank =<< stringField "filename" attachment,
+                description = nonBlank =<< stringField "asr_refer_text" attachment,
+                raw = Just attachment
+              }
+        )
 
 mediaKindFor :: Text -> MediaKind
 mediaKindFor contentType
@@ -339,14 +345,15 @@ qqOfficialTimestamp raw
             Just local -> Right (localTimeToUTC (minutesToTimeZone minutes) local)
 
 -- | Split a trailing offset off an RFC3339 timestamp.  The date itself contains
--- hyphens, so only a sign at or after the @T@ can begin an offset.
+-- hyphens, so only the last sign in the string can begin an offset.
 splitOffset :: Text -> (Text, Text)
-splitOffset text = case T.breakOnEnd isOffsetSign text of
-  (_, rest)
-    | T.null rest -> (text, "")
-    | otherwise -> (T.dropEnd (T.length rest) text, rest)
+splitOffset text = case signs of
+  [] -> (text, "")
+  _ ->
+    let at = last signs
+     in (T.take at text, T.drop at text)
   where
-    isOffsetSign c = c == '+' || c == '-'
+    signs = [index | (index, c) <- zip [0 ..] (T.unpack text), c == '+' || c == '-']
 
 parseOffset :: Text -> Either Text Int
 parseOffset text = case T.uncons text of
@@ -370,11 +377,6 @@ parseOffset text = case T.uncons text of
 stringField :: Text -> Value -> Maybe Text
 stringField name value = case objectField name value of
   Just (String text) -> Just text
-  _ -> Nothing
-
-objectField :: Text -> Value -> Maybe Value
-objectField name value = case value of
-  Object fields -> KeyMap.lookup (Key.fromText name) fields
   _ -> Nothing
 
 numberField :: Text -> Value -> Maybe Int64

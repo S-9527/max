@@ -26,6 +26,8 @@ module Max.QQOfficial.Types
   )
 where
 
+import Data.Bits (shiftL)
+import Data.Char (isSpace)
 import Data.Int (Int64)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -155,9 +157,9 @@ stripOutboundUrls = go 0 ""
   where
     go count acc rest = case breakScheme rest of
       Nothing -> (acc <> rest, count)
-      Just (before, schemeLength) ->
-        let scheme = T.take schemeLength rest
-            after = T.drop schemeLength rest
+      Just (offset, scheme) ->
+        let before = T.take offset rest
+            after = T.drop (T.length scheme) rest
             (urlText, tailText) = T.break isSpace after
          in if T.null urlText
               -- A bare scheme with no host is not a link; leave it alone and
@@ -165,12 +167,22 @@ stripOutboundUrls = go 0 ""
               then go count (acc <> before <> scheme) tailText
               else go (count + 1) (acc <> before <> urlPlaceholder) tailText
 
+    -- | Where the next link scheme starts, and which one it is.  A needle that
+    -- is absent yields an empty tail, so the match test has to be explicit: a
+    -- plain @breakOn@ would report the whole text as the prefix and cut in the
+    -- wrong place.
     breakScheme text =
-      case [(before, T.length scheme) | scheme <- schemes, Just before <- [fst (T.breakOn scheme text)]] of
+      case
+        [ (T.length before, scheme)
+        | scheme <- schemes,
+          let (before, tailText) = T.breakOn scheme text,
+          scheme `T.isPrefixOf` tailText
+        ]
+      of
         [] -> Nothing
-        matches -> Just (snd (foldr1 earlier matches))
+        matches -> Just (foldr1 earliest matches)
       where
-        earlier a b = if T.length (fst a) <= T.length (fst b) then a else b
+        earliest a b = if fst a <= fst b then a else b
 
     schemes = ["https://" :: Text, "http://"]
 
@@ -179,24 +191,33 @@ urlPlaceholder = "[链接]"
 
 -- | Fold wire parts down to what the platform will accept in one answer.
 --
--- Max plans a reply as however many chunks the content deserves, and this
--- platform counts every chunk against a fixed per-message budget.  Merging is
--- only safe between parts that carry no native media, so a media part is never
--- folded into its neighbour.
+-- Max plans a reply in as many chunks as the content deserves, and this platform
+-- counts every chunk against a fixed per-message budget.  Only the *surplus*
+-- parts are folded: merging all of them would replace Max's byte-budget
+-- chunking with one long message, so the first group grows by exactly as many
+-- parts as the budget is over and the rest are sent as planned.
+--
+-- A group that carries native media is never folded, because on this platform
+-- a media part is a message of its own.
 mergeChunksToBudget :: Int -> [[Node p]] -> [[Node p]]
 mergeChunksToBudget budget chunks
   | budget < 1 = chunks
   | otherwise = go chunks
   where
+    surplus = length chunks - budget
     go [] = []
-    go (firstChunk : rest) = grow [firstChunk] rest
-    grow acc [] = [acc]
-    grow acc (nextChunk : more)
-      | length acc >= budget = acc <> grow [nextChunk] more
-      | foldable acc nextChunk = grow (acc <> nextChunk) more
-      | otherwise = acc : grow [nextChunk] more
+    go parts@(firstChunk : rest)
+      | surplus <= 0 = parts
+      | otherwise = case foldGroup (surplus + 1) parts of
+          Just folded -> folded
+          -- Nothing can merge here; keep this part and look again further on.
+          Nothing -> firstChunk : go rest
 
-    foldable left right = all textLikeNode (left <> right)
+    foldGroup count parts = case splitAt count parts of
+      (group, remaining)
+        | length group == count, all textLikeNode (concat group) -> Just (concat group : remaining)
+        | otherwise -> Nothing
+
     textLikeNode = \case
       NMedia {} -> False
       _ -> True
