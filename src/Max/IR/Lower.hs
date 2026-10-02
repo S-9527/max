@@ -379,6 +379,7 @@ platformDisplayLabel = \case
   -- capabilities and delivery evidence differ — none of which is visible in a
   -- transcript line.
   PlatformWeChatHook -> "WeChat"
+  PlatformQQOfficial -> "QQ官方"
   PlatformCustom name -> name
 
 --------------------------------------------------------------------------------

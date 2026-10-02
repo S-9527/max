@@ -7,6 +7,11 @@ module OneBot.Types
     privateChatGroupId,
     privateChatUserId,
     isPrivateChat,
+    -- | The boundary the comment below describes. Exported so a platform that
+    -- allocates its own synthetic conversation ids can place them in the same
+    -- intervals instead of re-deriving the numbers (see
+    -- 'Max.DB.PlatformIds.toQQPrivateChatRange').
+    foreignCompatibilityBase,
   )
 where
 

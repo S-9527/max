@@ -148,6 +148,52 @@ the ordered semantic mention and its exact visible label.
 `imessage.bot_name` is only a compatibility fallback for a manually typed
 literal such as `@Maxwell`.
 
+## QQ official bot (`qqofficial`)
+
+The open platform's own bot, reached at `api.bot.qq.com`. It is a **separate
+platform**, not another QQ edge: a OneBot endpoint and an official bot endpoint
+are different accounts, and the official one addresses people by openid rather
+than by number. Both can be configured at once; nothing is shared but the
+ledger.
+
+The connection direction is the reverse of the OneBot edge. Max dials out to the
+gateway and the OpenAPI, so there is no protocol end to operate, no public
+address and no inbound callback — a laptop behind NAT is a complete deployment.
+The gateway address is discovered from `/gateway/bot`, not configured.
+
+Recovery is a cursor, not a sweep. Every dispatch carries a sequence number and a
+resumed session replays everything after the last one this process handled, so
+the endpoint's `platform_ingest_cursors` row holds `{session_id, seq}` under the
+`gateway` stream key. `qq_backfill_runs` is OneBot's own mechanism and does not
+cover this platform; there is no message-history API to sweep either.
+
+Identity follows the reference index. A group names its conversation with
+`group_openid` and its people with `member_openid`, both scoped to this
+application. One-to-one chats have no numeric id of their own, so their synthetic
+conversation id is re-banded into the interval `isPrivateChat` accepts — without
+that, every caller that reads the chat kind from the sign of the number would
+handle a one-to-one chat as a room.
+
+Two ids name one message and are not interchangeable: `msg_idx` from the message
+scene is what a *visible* quote must name, and the event's `msg_id` is what a
+*passive* answer must carry. The ledger keys on the reference index because that
+is the one a later quote needs.
+
+Outbound answers are rationed by the platform: five sends per group message
+inside five minutes, four per chat message inside an hour. Long replies are
+folded to that budget, and an answer that arrives too late is re-sent as an
+ordinary message rather than dropped. Group messages may not contain a URL
+(`err_code 40054010`), so links are replaced with `［链接］` on the way out.
+
+Owners are configured as openids (`qqofficial.owners`) and resolved at startup
+into the numeric ids the message store keys by. An operator never has to read a
+synthetic id off the database.
+
+This platform currently declares media on its text tier: sending rich media needs
+a two-step upload for a short-lived `file_info`, which has not yet been exercised
+against a live bot. Inbound attachments (images, video, and voice with the
+platform's own transcription as the caption) are ingested normally.
+
 ## Diagnostics
 
 With the admin server enabled:

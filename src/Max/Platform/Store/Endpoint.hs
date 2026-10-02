@@ -5,6 +5,7 @@ module Max.Platform.Store.Endpoint
     RegisteredEndpoint (..),
     EndpointRow (..),
     createConversation,
+    ensurePlatformAccount,
     platformForLegacyConversation,
     platformForLegacyMessage,
     registerEndpoint,
@@ -393,6 +394,31 @@ ensureConfiguredEndpoint platform nativeAccount nativeConversation kind mode mLe
           conversationId = ConversationId conversation,
           compatibilityConversationId = legacyConversation
         }
+
+-- | Upsert the account row on its own.
+--
+-- Endpoint registration creates the account as a side effect, which is the
+-- right order for a platform whose conversations are discovered from traffic.
+-- Some adapters need the account before any conversation exists: an ingest
+-- cursor is keyed by account, and a gateway session that only learns its
+-- conversations from the events it receives has to remember where it stopped
+-- resuming before the first event arrives.
+ensurePlatformAccount ::
+  (WithConnection :> es, IOE :> es) =>
+  Platform ->
+  NativeAccountId ->
+  OutboundCaps ->
+  Eff es PlatformAccountId
+ensurePlatformAccount platform nativeAccount capabilities = do
+  rows <-
+    query
+      "INSERT INTO platform_accounts (platform, native_account_id, capabilities) \
+      \ VALUES (?, ?, ?) \
+      \ ON CONFLICT (platform, native_account_id) DO UPDATE \
+      \ SET capabilities = EXCLUDED.capabilities, updated_at = now() \
+      \ RETURNING platform_account_id"
+      (renderPlatform platform, nativeAccount, Jsonb (capabilitiesValue capabilities))
+  pure (PlatformAccountId (exactlyOne "ensurePlatformAccount" rows))
 
 fetchEndpoint ::
   (WithConnection :> es, IOE :> es) =>

@@ -362,6 +362,11 @@ library
         Max.Platform.Store.Relation
         Max.Platform.Ingress
         Max.Platform.QQ
+        Max.QQOfficial
+        Max.QQOfficial.API
+        Max.QQOfficial.Events
+        Max.QQOfficial.Gateway
+        Max.QQOfficial.Types
         Max.Prompt
         Max.Prompt.Render
         Max.Prompt.Request
@@ -754,6 +759,7 @@ test-suite max-test
         Max.EpisodeStoreSpec
         Max.MCP.ClientSpec
         Max.PlatformSpec
+        Max.QQOfficialSpec
         Max.Platform.DeliverySpec
         Max.PromptFlowSpec
         PromptFlow

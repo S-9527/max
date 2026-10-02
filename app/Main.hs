@@ -80,6 +80,7 @@ import Max.Platform.Ingress (newIngress)
 import Max.Platform.Runtime (qqBackend, runPlatforms)
 import Max.Platform.Store.Delivery (deliveryProcessBoundary)
 import Max.Platform.Types (Platform (..))
+import Max.QQOfficial (QQOfficialRuntime, newQQOfficialRuntime, qqOfficialDeliveryTransport, qqOfficialWorker, resolveQQOfficialOwners)
 import Max.Sandbox.Registry
   ( gcExpiredSandboxes,
     newDurableSandboxRegistry,
@@ -116,6 +117,10 @@ main = do
 
   cfg <- loadConfig
   httpRuntime <- newHttpRuntime
+  -- One adapter instance owns its token cell, its passive-reply windows and its
+  -- gateway session, so it is built here and shared by the ingress worker and
+  -- the delivery transport rather than reconstructed on either side.
+  qqRuntime <- traverse (newQQOfficialRuntime httpRuntime) cfg.qqofficial
   searchRuntime <- traverse newSearchRuntime cfg.search
   bracket (newDbPool cfg.db) closeDbPool $ \pool -> do
     applied <- runMigrations pool cfg.migrationsDir
@@ -162,6 +167,13 @@ main = do
                   <> [matrixDeliveryTransport httpRuntime matrixCfg | matrixCfg <- maybeToList cfg.matrix]
                   <> [iMessageDeliveryTransport httpRuntime iMessageCfg | iMessageCfg <- maybeToList cfg.imessage]
                   <> [oneBotDeliveryTransport httpRuntime PlatformWeChatHook backend | backend <- foreignEdges]
+                  <> [ qqOfficialDeliveryTransport runtime
+                     | (cfg.qqofficial, Just runtime) <- [(cfg.qqofficial, qqRuntime)]
+                     ]
+          -- Owners configured as openids are translated into the numeric ids the
+          -- message store keys by, once, before anything reads them.
+          qqOwners <- runEff . runWithConnectionPool pool $
+            maybe (pure []) resolveQQOfficialOwners cfg.qqofficial
           let env =
                 BotEnv
                   { bePersona = cfg.persona,
@@ -174,7 +186,7 @@ main = do
                     beStartedAt = startedAt,
                     beSessions = sessions,
                     beSkills = skillReg,
-                    beOwners = cfg.owners,
+                    beOwners = cfg.owners <> qqOwners,
                     beAdminTarget = adminTargets,
                     beWebhookBaseUrl = cfg.admin >>= (.acWebhookBaseUrl),
                     beTasks = tasks,
@@ -388,6 +400,9 @@ runApp httpRuntime cfg deliveryTransports applied eventQ fetchSig intentState lo
                ]
             <> [ worker "imessage" RequiredWorker (recovering "imessage ingress" (iMessageWorker httpRuntime iMessageCfg env.beEpisodeScheduler env.beIngress env.beDeliveries))
                | iMessageCfg <- maybeToList cfg.imessage
+               ]
+            <> [ worker "qqofficial" RequiredWorker (recovering "qqofficial gateway" (qqOfficialWorker runtime env.beEpisodeScheduler env.beIngress))
+               | (cfg.qqofficial, Just runtime) <- [(cfg.qqofficial, qqRuntime)]
                ]
 
         sandboxGc = forever $ do

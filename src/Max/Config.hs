@@ -50,6 +50,8 @@ import Max.Matrix (MatrixConfig (..))
 import Max.ModelCatalog (ContextLimits (..), ModelCatalog, contextLimitsForWindow, defaultContextLimits, modelProfileNames)
 import Max.ModelCatalog.Internal (LLMProfile (..), Protocol (..), ProviderConcurrency (..), VisionLimits (..), mkModelCatalogFromProfiles, parseProtocol)
 import Max.Monitor.Http (validWebhookBaseUrl)
+import Max.QQOfficial (QQOfficialConfig (..))
+import Max.QQOfficial.Types (qqOfficialGatewayIntents)
 import Max.Tools.Search (SearchConfig (..))
 import Max.WechatHook (WechatHookConfig (..))
 import OneBot.Server (ServerConfig (..))
@@ -138,6 +140,8 @@ data AppConfig = AppConfig
     imessage :: !(Maybe IMessageConfig),
     -- | WeChat backend over a hooked Windows PC client.
     wechathook :: !(Maybe WechatHookConfig),
+    -- | The QQ open platform's own bot, reached over its gateway and OpenAPI.
+    qqofficial :: !(Maybe QQOfficialConfig),
     -- | Proactive-trigger intent classification; 'Nothing' disables
     -- it (the bot only answers @-mentions/quotes, as before).
     intent :: !(Maybe IntentConfig),
@@ -232,6 +236,7 @@ validateConfig cfg =
       maybe [] validateMatrix cfg.matrix,
       maybe [] validateIMessage cfg.imessage,
       maybe [] validateWechatHook cfg.wechathook,
+      maybe [] validateQQOfficial cfg.qqofficial,
       maybe [] validateIntent cfg.intent,
       maybe [] (\searchCfg -> invalid "search.max_results" (searchCfg.scDefaultMaxResults < 1 || searchCfg.scDefaultMaxResults > 10) <> invalid "search.timeout_seconds" (searchCfg.scTimeoutSeconds <= 0 || searchCfg.scTimeoutSeconds > 300)) cfg.search,
       validateProfile "memory.extract_profile" cfg.memoryExtractProfile,
@@ -268,6 +273,14 @@ validateConfig cfg =
         <> invalid "wechathook.listen_port" (hookCfg.whListenPort <= 0 || hookCfg.whListenPort > 65535)
         <> invalid "wechathook.callback_path" (not ("/" `T.isPrefixOf` hookCfg.whCallbackPath))
         <> invalid "wechathook.silence_seconds" (hookCfg.whSilenceSeconds < 0)
+    -- A QQ open platform bot without a secret cannot authenticate, and an intent
+    -- word of zero identifies against nothing and is closed at once.  Both are
+    -- reported here rather than as a gateway that silently never connects.
+    validateQQOfficial qqCfg =
+      nonempty "qqofficial.app_id" qqCfg.qoAppId
+        <> nonempty "qqofficial.app_secret" qqCfg.qoAppSecret
+        <> invalid "qqofficial.intents" (qqCfg.qoIntents == 0)
+        <> invalid "qqofficial.owners" (any T.null (map T.strip qqCfg.qoOwners))
     validateIntent intentCfg =
       concat
         [ invalid "intent.cooldown_seconds" (intentCfg.icCooldownSeconds < 0),
@@ -476,6 +489,7 @@ appConfigParser usedRef =
     matrix <- subConfig "matrix" matrixParser
     imessage <- subConfig "imessage" iMessageParser
     wechathook <- subConfig "wechathook" wechatHookParser
+    qqofficial <- subConfig "qqofficial" qqOfficialParser
     intent <- subConfig "intent" intentParser
     admin <- subConfig "admin" adminParser
     adminCallRetentionDays <-
@@ -1061,6 +1075,122 @@ wechatHookParser = do
           whSilenceSeconds = silenceSeconds,
           whBridgeUrl = bridgeUrl,
           whBridgeToken = bridgeToken
+        }
+
+-- | Enable the QQ open platform bot when @app_id@ is configured.  Max dials out
+-- to the gateway and the OpenAPI, so nothing has to be reachable from the
+-- internet; @sandbox@ only picks which deployment is addressed, and the IP
+-- whitelist the platform applies to a production bot is outside Max entirely.
+qqOfficialParser :: Parser (Maybe QQOfficialConfig)
+qqOfficialParser = do
+  mAppId <-
+    optional $
+      setting
+        [ help "QQ open platform AppID (presence enables the QQ official bot adapter)",
+          reader str,
+          option,
+          long "qqofficial-app-id",
+          env "MAX_QQOFFICIAL_APP_ID",
+          conf "app_id",
+          metavar "APPID"
+        ]
+  appSecret <-
+    setting
+      [ help "QQ open platform AppSecret; only ever exchanged for a short-lived access token",
+        reader str,
+        option,
+        long "qqofficial-app-secret",
+        env "MAX_QQOFFICIAL_APP_SECRET",
+        conf "app_secret",
+        metavar "SECRET",
+        value ""
+      ]
+  apiBase <-
+    optional $
+      setting
+        [ help "Override the open platform host (the sandbox is a separate deployment)",
+          reader str,
+          option,
+          long "qqofficial-api-base",
+          env "MAX_QQOFFICIAL_API_BASE",
+          conf "api_base",
+          metavar "URL"
+        ]
+  sandbox <-
+    setting
+      [ help "Address the platform's sandbox deployment instead of production",
+        reader auto,
+        option,
+        long "qqofficial-sandbox",
+        env "MAX_QQOFFICIAL_SANDBOX",
+        conf "sandbox",
+        metavar "BOOL",
+        value False
+      ]
+  intents <-
+    setting
+      [ help
+          "Gateway intent bits. Only bits this application holds may be \
+          \requested; an unauthorised intent closes the connection at identify. \
+          \The default is GROUP_AND_C2C_EVENT (1<<25).",
+        reader auto,
+        option,
+        long "qqofficial-intents",
+        env "MAX_QQOFFICIAL_INTENTS",
+        conf "intents",
+        metavar "BITS",
+        value qqOfficialGatewayIntents
+      ]
+  botName <-
+    setting
+      [ help "Display name used when the transcript shows an @-mention of the bot",
+        reader str,
+        option,
+        long "qqofficial-bot-name",
+        env "MAX_QQOFFICIAL_BOT_NAME",
+        conf "bot_name",
+        metavar "NAME",
+        value "Max"
+      ]
+  owners <-
+    setting
+      [ help
+          "Bot owners as openids (comma separated). Max authorizes owners by \
+          \a number it allocates internally, so the openid the platform shows \
+          \you is what belongs here.",
+        reader (commaSeparatedList str),
+        option,
+        long "qqofficial-owners",
+        env "MAX_QQOFFICIAL_OWNERS",
+        conf "owners",
+        metavar "OPENID[,OPENID..]",
+        value []
+      ]
+  fullGroupMessages <-
+    setting
+      [ help
+          "Ask for every group message rather than only @-mentions. The group's \
+          \own settings still decide whether the platform delivers them.",
+        reader auto,
+        option,
+        long "qqofficial-full-group-messages",
+        env "MAX_QQOFFICIAL_FULL_GROUP_MESSAGES",
+        conf "full_group_messages",
+        metavar "BOOL",
+        value False
+      ]
+  pure $ do
+    appId <- mAppId
+    pure
+      QQOfficialConfig
+        { qoAppId = appId,
+          qoAppSecret = appSecret,
+          qoApiBase = apiBase,
+          qoSandbox = sandbox,
+          qoIntents = intents,
+          qoBotName = botName,
+          qoOwners = owners,
+          qoFullGroupMessages = fullGroupMessages
         }
 
 intentParser :: Parser (Maybe IntentConfig)

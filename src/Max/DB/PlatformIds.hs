@@ -6,6 +6,8 @@ module Max.DB.PlatformIds
   ( mappedId,
     nativeId,
     compatibilityId,
+    compatibilityIdForDirectChat,
+    toQQPrivateChatRange,
   )
 where
 
@@ -17,6 +19,7 @@ import Database.PostgreSQL.Simple (Only (..))
 import Effectful (Eff, IOE, type (:>))
 import Effectful.PostgreSQL (WithConnection, query)
 import Max.DB.Codec (exactlyOne)
+import OneBot.Types (foreignCompatibilityBase)
 import Text.Read (readMaybe)
 
 -- | The synthetic bigint for a native id, allocating one on first
@@ -73,3 +76,33 @@ compatibilityId platformName kind native =
           \ RETURNING mapped_id"
           (platformName, kind, native)
       pure (exactlyOne "compatibilityId" rows)
+
+-- | The synthetic id a platform without numeric ids of its own must present
+-- for a *direct* conversation.
+--
+-- The whole pipeline keys a conversation by one 'Int64' and 'isPrivateChat'
+-- decides the chat kind from its sign, so a foreign conversation that keeps
+-- its raw synthetic id at or below -10^12 is read as a group no matter what
+-- @conversations.conversation_kind@ says — seventeen call sites, from the
+-- permission tier to the memory scope, would silently treat a one-to-one chat
+-- as a room.  QQ uins are at most ten digits, so the top of the QQ direct
+-- interval carries a billion times more room than real numbers occupy and no
+-- real QQ number can reach it.
+toQQPrivateChatRange :: Int64 -> Int64
+toQQPrivateChatRange mapped =
+  negate (qqPrivateChatRangeBase + ((abs mapped - foreignCompatibilityBase) `max` 1))
+
+-- | Allocate a synthetic id for a direct conversation on a foreign platform.
+compatibilityIdForDirectChat ::
+  (WithConnection :> es, IOE :> es) =>
+  Text ->
+  Text ->
+  Text ->
+  Eff es Int64
+compatibilityIdForDirectChat platformName kind native =
+  toQQPrivateChatRange <$> compatibilityId platformName kind native
+
+-- | @-(10^11 + n)@: below every QQ uin, above @-10^12@, hence inside the
+-- interval 'isPrivateChat' treats as a direct chat.
+qqPrivateChatRangeBase :: Int64
+qqPrivateChatRangeBase = 100000000000

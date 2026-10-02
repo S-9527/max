@@ -483,6 +483,49 @@ llm:
 #     wxid_exampleuser02: 小李
 
 # ─────────────────────────────────────────────────────────────────────────────
+# QQ official bot (QQ开放平台 / api.bot.qq.com).
+#
+# A separate platform from the OneBot edge above, not a replacement for it: the
+# two are different accounts with different identities (numeric uins versus
+# per-app openids), different capabilities and different delivery evidence, and
+# both can be configured at the same time.
+#
+# The direction of travel is opposite too.  Max dials out to the gateway and the
+# OpenAPI, so there is no protocol end to run, no public address and no inbound
+# callback — which is also why this works from a laptop behind NAT.
+#
+#   app_id / app_secret   from the open platform console (开发 -> 开发设置)
+#   sandbox               true while testing: the sandbox only sees the groups
+#                         and accounts configured under 沙箱配置, and the IP
+#                         whitelist does not apply to it
+#   owners                your openids. Max authorizes owners by a number it
+#                         allocates internally, so the openid the platform shows
+#                         you is what belongs here, not a QQ number
+#   full_group_messages   asks for every group message. The group's own settings
+#                         still decide whether the platform delivers them.
+#
+# Two platform rules shape what arrives and what goes out:
+#
+#   * Answers are rationed.  A group message may be answered 5 times inside 5
+#     minutes, a one-to-one chat 4 times inside 60 minutes.  Max folds a long
+#     reply into as many parts as that budget allows, and an answer that arrives
+#     too late is re-sent as an ordinary message instead of being dropped.
+#   * Group messages may not contain a URL (err_code 40054010), so links Max
+#     produces are replaced with [链接] on the way out.  Rich media is not sent
+#     yet: it needs a two-step upload for a short-lived file_info, and until that
+#     path has been exercised against a live bot, pictures fold to readable text
+#     rather than being advertised and lost.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# qqofficial:
+#   app_id: "102000000"
+#   app_secret: "..."
+#   sandbox: true
+#   owners: ["A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4"]
+#   full_group_messages: true
+#   bot_name: "Max"
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Embeddings (vector search).  Any OpenAI-compatible /embeddings endpoint;
 # presence of base_url + model enables the background embed worker and adds
 # semantic candidates to the unified context_search tool.

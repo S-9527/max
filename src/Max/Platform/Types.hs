@@ -105,6 +105,11 @@ data Platform
     -- hook's own.  A WeChatPadPro relay lived beside it here until 2026-08-18,
     -- when that project stopped being maintained and the adapter was deleted.
     PlatformWeChatHook
+  | -- | The QQ open platform's own bot (api.bot.qq.com).  Its own platform
+    -- rather than "QQ": a OneBot endpoint and an official bot endpoint are
+    -- different accounts with different identities, capabilities and delivery
+    -- evidence, and the official one addresses people by openid.
+    PlatformQQOfficial
   | PlatformCustom !Text
   deriving stock (Eq, Ord, Show, Generic)
 
@@ -114,6 +119,7 @@ renderPlatform = \case
   PlatformMatrix -> "matrix"
   PlatformIMessage -> "imessage"
   PlatformWeChatHook -> "wechathook"
+  PlatformQQOfficial -> "qqofficial"
   PlatformCustom name -> name
 
 parsePlatform :: Text -> Platform
@@ -122,6 +128,7 @@ parsePlatform = \case
   "matrix" -> PlatformMatrix
   "imessage" -> PlatformIMessage
   "wechathook" -> PlatformWeChatHook
+  "qqofficial" -> PlatformQQOfficial
   name -> PlatformCustom name
 
 data ConversationKind = ConversationGroup | ConversationDirect
