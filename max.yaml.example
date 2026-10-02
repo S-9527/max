@@ -483,7 +483,7 @@ llm:
 #     wxid_exampleuser02: 小李
 
 # ─────────────────────────────────────────────────────────────────────────────
-# QQ official bot (QQ开放平台 / api.sgroup.qq.com).
+# QQ official bot (QQ开放平台 / api.bot.qq.com).
 #
 # A separate platform from the OneBot edge above, not a replacement for it: the
 # two are different accounts with different identities (numeric uins versus

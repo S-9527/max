@@ -354,6 +354,8 @@ spec = do
       gatewayConnectTarget "wss://api.bot.qq.com/websocket/"
         `shouldBe` Just (GatewayTarget "api.bot.qq.com" 443 "/websocket/" False)
       -- The platform asks for compression in the address itself.
+      -- The platform hands out whatever host it likes, including the older
+      -- sgroup spelling, so the connect side reads it rather than assuming.
       gatewayConnectTarget "wss://api.sgroup.qq.com/websocket?compress=zlib&v=2"
         `shouldBe` Just (GatewayTarget "api.sgroup.qq.com" 443 "/websocket?compress=zlib&v=2" True)
       gatewayConnectTarget "http://api.bot.qq.com/websocket" `shouldBe` Nothing
@@ -365,7 +367,11 @@ spec = do
     it "decides what a close code means for the next attempt" $ do
       closeRecovery 4009 `shouldBe` RecoveryResume -- connection expired
       closeRecovery 4007 `shouldBe` RecoveryIdentify -- seq error
-      closeRecovery 4013 `shouldBe` RecoveryIdentify -- unauthorised intent
+      -- Neither RESUME nor IDENTIFY can satisfy an intent the platform has
+      -- already refused, so reconnecting with the same intents would only be
+      -- closed again.
+      closeRecovery 4013 `shouldBe` RecoveryFatal -- invalid intent
+      closeRecovery 4014 `shouldBe` RecoveryFatal -- intent not authorised
       closeRecovery 4914 `shouldBe` RecoveryFatal -- bot offline
       closeRecovery 4915 `shouldBe` RecoveryFatal -- bot banned
 
@@ -476,5 +482,5 @@ spec = do
 
     it "addresses the sandbox and production as separate deployments" $ do
       qqOfficialApiBase cfg `shouldBe` "https://api.bot.qq.com"
-      qqOfficialApiBase cfg {qoSandbox = True} `shouldBe` "https://sandbox.api.sgroup.qq.com"
+      qqOfficialApiBase cfg {qoSandbox = True} `shouldBe` "https://sandbox.api.bot.qq.com"
       qqOfficialApiBase cfg {qoApiBase = Just "https://example.test"} `shouldBe` "https://example.test"
