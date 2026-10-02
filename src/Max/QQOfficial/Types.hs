@@ -33,7 +33,7 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import GHC.Generics (Generic)
-import Max.IR (Node (..))
+import Max.IR (Node (..), mergeText)
 import Max.IR.Lower (OutboundCaps (..), Tier (..), textOnlyCaps)
 import Max.Platform.Types (ConversationKind (..))
 import OneBot.Types (GroupId (..), isPrivateChat)
@@ -159,7 +159,8 @@ stripOutboundUrls = go 0 ""
       Nothing -> (acc <> rest, count)
       Just (offset, scheme) ->
         let before = T.take offset rest
-            after = T.drop (T.length scheme) rest
+            -- The scheme starts at @offset@, not at the front of the rest.
+            after = T.drop (offset + T.length scheme) rest
             (urlText, tailText) = T.break isSpace after
          in if T.null urlText
               -- A bare scheme with no host is not a link; leave it alone and
@@ -215,7 +216,9 @@ mergeChunksToBudget budget chunks
 
     foldGroup count parts = case splitAt count parts of
       (group, remaining)
-        | length group == count, all textLikeNode (concat group) -> Just (concat group : remaining)
+        -- Folding two parts produces one part, so its text runs merge: the
+        -- merged chunk is what the platform receives as a single string.
+        | length group == count, all textLikeNode (concat group) -> Just (mergeText (concat group) : remaining)
         | otherwise -> Nothing
 
     textLikeNode = \case

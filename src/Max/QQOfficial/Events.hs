@@ -188,8 +188,10 @@ sceneParser = withObject "message scene" $ \o -> do
 sceneExtensions :: [Value] -> Map Text Text
 sceneExtensions entries = Map.fromList (mapMaybe pair entries)
   where
+    -- Only the separator goes: a @msg_idx@ is base64 and ends in @==@, so a
+    -- split on every @=@ would leave the value truncated.
     pair (String entry) = case T.breakOn "=" entry of
-      (key, value) | not (T.null key), not (T.null value) -> Just (T.strip key, T.strip value)
+      (key, rest) | not (T.null key), not (T.null rest) -> Just (T.strip key, T.strip (T.drop 1 rest))
       _ -> Nothing
     pair _ = Nothing
 

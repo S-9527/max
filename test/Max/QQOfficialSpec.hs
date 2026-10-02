@@ -161,7 +161,8 @@ compositeEvent =
 -- the whole event.
 withFields :: Value -> [Pair] -> Value
 withFields base extra = case (base, object extra) of
-  (Object a, Object b) -> Object (a <> b)
+  -- KeyMap's Semigroup is left-biased, so the patch goes on the left.
+  (Object old, Object added) -> Object (added <> old)
   _ -> base
 
 -- | Why the adapter refused a group payload, if it did.  An event has no 'Show'
@@ -409,9 +410,12 @@ spec = do
       event <- parseQQOfficial "GROUP_MESSAGE_CREATE" otherBotEvent
       event.qoeSenderIsSelf `shouldBe` False
 
-    it "keeps a merged message as the parts the platform sent" $ do
+    it "reads a merged message from its parts, not the rendered transcript" $ do
+      -- The transcript is a single space; only msg_elements carries what was
+      -- sent.  Adjacent text merges into one node, which is what the canonical
+      -- form is everywhere else in Max.
       event <- parseQQOfficial "GROUP_AT_MESSAGE_CREATE" compositeEvent
-      event.qoeContent `shouldBe` [NMention (NativeUserId "1020000001") "小鲨", NText "a", NText "b"]
+      event.qoeContent `shouldBe` [NMention (NativeUserId "1020000001") "小鲨", NText "ab"]
 
     it "refuses an event that names no conversation" $
       refusal (object ["id" .= ("x" :: Text)]) `shouldSatisfy` isJust
