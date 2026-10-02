@@ -89,7 +89,7 @@ currentToken runtime cfg cache = do
 -- HTTP status worth trusting: a bad secret arrives as 200 with @code@ 100016.
 fetchToken :: HttpRuntime -> QQOfficialConfig -> IO (Either Text CachedToken)
 fetchToken runtime cfg =
-  apiRequest runtime cfg Nothing "POST" "/app/getAppAccessToken" (Just body) >>= \case
+  apiRequest runtime qqOfficialTokenHost Nothing "POST" "/app/getAppAccessToken" (Just body) >>= \case
     Left failure -> pure (Left (renderTransportFailure failure))
     Right value -> case businessCode value of
       Just code ->
@@ -110,9 +110,19 @@ fetchToken runtime cfg =
     tokenParser = withObject "access token" $ \o -> do
       token <- o .: "access_token" :: Parser Text
       -- Documented as "at most 7200"; a platform that reports less is obeyed
-      -- rather than assumed away.
-      expires <- o .:? "expires_in" .!= (7200 :: Int)
+      -- rather than assumed away.  The field arrives as a JSON string on the
+      -- sandbox and as a number in production, so both are read rather than
+      -- trusting one deployment's spelling.
+      expires <- case KeyMap.lookup "expires_in" o of
+        Nothing -> pure 7200
+        Just (Number n) -> pure (truncate n)
+        Just (String t) -> maybe (fail ("expires_in is not a number: " <> T.unpack t)) pure (numeric t)
+        Just _ -> fail "expires_in is neither a number nor a string"
       pure (token, expires)
+
+    numeric t = case reads (T.unpack t) of
+      [(n, "")] -> Just n
+      _ -> Nothing
 
 -- | The gateway address is discovered rather than configured: the platform
 -- returns it, and it differs between the sandbox and production.
@@ -121,7 +131,7 @@ qqOfficialGatewayUrl runtime cfg cache =
   currentToken runtime cfg cache >>= \case
     Left err -> pure (Left err)
     Right token ->
-      apiRequest runtime cfg (Just token) "GET" ("/gateway/bot" :: Text) Nothing >>= \case
+      apiRequest runtime (qqOfficialApiBase cfg) (Just token) "GET" "/gateway" Nothing >>= \case
         Left failure -> pure (Left (renderTransportFailure failure))
         Right value -> case parseEither (withObject "gateway" (\o -> o .: "url" :: Parser Text)) value of
           Left err -> pure (Left ("QQ official gateway response: " <> T.pack err))
@@ -234,7 +244,7 @@ sendQQOfficialMessage runtime cfg cache kind mMsgId openid plan =
   currentToken runtime cfg cache >>= \case
     Left err -> pure (Left (QQOfficialTransport (ProtocolFailure err)))
     Right token ->
-      apiRequest runtime cfg (Just token) "POST" (sendPath kind openid) (Just (renderPlan mMsgId plan)) >>= \case
+      apiRequest runtime (qqOfficialApiBase cfg) (Just token) "POST" (sendPath kind openid) (Just (renderPlan mMsgId plan)) >>= \case
         Left failure -> pure (Left (QQOfficialTransport failure))
         Right value -> case businessCode value of
           Just code ->
@@ -274,16 +284,18 @@ renderPlan mMsgId plan =
 -- Every 2xx body is decoded here, including the failures: this API reports a
 -- rejected send with HTTP 200 and an error code, so a status check would call
 -- every refusal a success.
+-- The host is a parameter because the token endpoint is not on the deployment
+-- host: it is the same address for sandbox and production.
 apiRequest ::
   HttpRuntime ->
-  QQOfficialConfig ->
+  Text ->
   Maybe Text ->
   BS.ByteString ->
   Text ->
   Maybe Value ->
   IO (Either TransportFailure Value)
-apiRequest runtime cfg mToken method path payload = do
-  let url = qqOfficialApiBase cfg <> path
+apiRequest runtime host mToken method path payload = do
+  let url = host <> path
   parseRequestEither (T.unpack url) >>= \case
     Left failure -> pure (Left failure)
     Right request0 -> do

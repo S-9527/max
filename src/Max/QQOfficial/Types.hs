@@ -11,6 +11,7 @@
 module Max.QQOfficial.Types
   ( QQOfficialConfig (..),
     qqOfficialApiBase,
+    qqOfficialTokenHost,
     qqOfficialCapabilities,
     qqOfficialReplyPartBudget,
     qqOfficialKindOfLegacyId,
@@ -88,10 +89,23 @@ instance Show QQOfficialConfig where
 qqOfficialApiBase :: QQOfficialConfig -> Text
 qqOfficialApiBase cfg = fromMaybe (sandboxOrProduction cfg.qoSandbox) cfg.qoApiBase
 
+-- | The open platform's one documented request host, and the sandbox spelling
+-- of it.  Sandbox and production are separate deployments; which one a
+-- credential belongs to is decided by the credential, not by the host.
+--
+-- The gateway address comes back from @/gateway@ and may name either the
+-- @sgroup@ spelling or this one, which is why the connect side only ever reads
+-- the host the platform hands out.
 sandboxOrProduction :: Bool -> Text
 sandboxOrProduction sandbox
-  | sandbox = "https://sandbox.api.sgroup.qq.com"
+  | sandbox = "https://sandbox.api.bot.qq.com"
   | otherwise = "https://api.bot.qq.com"
+
+-- | Where the app credentials are exchanged for a bearer token.  The same
+-- address in both deployments: asking the sandbox host for a token answers 404
+-- "unsupported call".
+qqOfficialTokenHost :: Text
+qqOfficialTokenHost = "https://api.bot.qq.com"
 
 -- | @GROUP_AND_C2C_EVENT@, the one bit that carries group at-messages, full
 -- group messages and one-to-one chats.  Group membership changes and the

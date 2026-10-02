@@ -160,9 +160,13 @@ eventParser = withObject "message event" $ \o -> do
   attachments <- o .:? "attachments" .!= ([] :: [Value])
   mentions <- o .:? "mentions" .!= ([] :: [Value])
   timestamp <- o .:? "timestamp" .!= ("" :: Text)
-  conversation <- case (group, user) of
-    (Just g, _) | not (T.null g) -> pure g
-    (_, Just u) | not (T.null u) -> pure u
+  -- A group names itself at the top level; a one-to-one chat does not name its
+  -- conversation at all \u2014 the other party is the author, and the C2C event
+  -- carries their openid only inside @author@.
+  conversation <- case (group, user, stringField "user_openid" author) of
+    (Just g, _, _) | not (T.null g) -> pure g
+    (_, Just u, _) | not (T.null u) -> pure u
+    (_, _, Just u) | not (T.null u) -> pure u
     _ -> fail "event names neither group_openid nor user_openid"
   pure
     RawEvent

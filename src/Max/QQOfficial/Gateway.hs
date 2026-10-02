@@ -122,19 +122,27 @@ gatewayConnectTarget url = do
 
 -- | Identify is how a fresh session starts.  The token is presented as
 -- @QQBot \<access token\>@, which is not the string the OpenAPI header carries.
+--
+-- The opcode envelope is part of the payload: every gateway frame is
+-- @{"op": n, "d": \{…\}}@, and a frame sent without it is a frame the platform
+-- does not read \u2014 which it answers by simply never establishing a session.
 identifyPayload :: Text -> Int64 -> Value
 identifyPayload token intents =
   object
-    [ "token" .= ("QQBot " <> token),
-      "intents" .= intents,
-      -- One shard: this adapter is a single instance and does not spread one
-      -- bot across connections.
-      "shard" .= ([0, 1] :: [Int]),
-      "properties"
+    [ "op" .= (2 :: Int),
+      "d"
         .= object
-          [ "$os" .= ("linux" :: Text),
-            "$browser" .= ("max" :: Text),
-            "$device" .= ("max" :: Text)
+          [ "token" .= ("QQBot " <> token),
+            "intents" .= intents,
+            -- One shard: this adapter is a single instance and does not spread
+            -- one bot across connections.
+            "shard" .= ([0, 1] :: [Int]),
+            "properties"
+              .= object
+                [ "$os" .= ("linux" :: Text),
+                  "$browser" .= ("max" :: Text),
+                  "$device" .= ("max" :: Text)
+                ]
           ]
     ]
 
@@ -144,9 +152,13 @@ identifyPayload token intents =
 resumePayload :: Text -> Text -> Int64 -> Value
 resumePayload token sessionId seqNo =
   object
-    [ "token" .= ("QQBot " <> token),
-      "session_id" .= sessionId,
-      "seq" .= seqNo
+    [ "op" .= (6 :: Int),
+      "d"
+        .= object
+          [ "token" .= ("QQBot " <> token),
+            "session_id" .= sessionId,
+            "seq" .= seqNo
+          ]
     ]
 
 -- | Heartbeat carries the last sequence number seen, so the platform knows what
@@ -172,6 +184,11 @@ closeRecovery code = case code of
   4009 -> RecoveryResume -- connection expired; resume is explicitly allowed
   4010 -> RecoveryFatal -- invalid shard
   4012 -> RecoveryFatal -- invalid version
+  -- An unauthorised or malformed intent is refused by identify itself, and the
+  -- platform documents neither RESUME nor IDENTIFY as a way out: reconnecting
+  -- with the same intents would only be closed again.
+  4013 -> RecoveryFatal -- invalid intent
+  4014 -> RecoveryFatal -- intent not authorised for this application
   4914 -> RecoveryFatal -- bot taken offline
   4915 -> RecoveryFatal -- bot banned
   _ -> RecoveryIdentify

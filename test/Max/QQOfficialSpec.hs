@@ -66,17 +66,19 @@ groupAtEvent =
           ]
     ]
 
+-- The one-to-one event names no conversation at the top level: the other party
+-- is the author, whose @user_openid@ is the conversation.
 c2cEvent :: Value
 c2cEvent =
   object
     [ "id" .= ("ROBOT1.0_c2c" :: Text),
       "content" .= ("在吗" :: Text),
-      "user_openid" .= ("USEROPENID1" :: Text),
       "timestamp" .= ("2026-07-21T10:00:00+08:00" :: Text),
       "message_type" .= (0 :: Int),
       "author"
         .= object
-          [ "user_openid" .= ("USEROPENID1" :: Text),
+          [ "id" .= ("USEROPENID1" :: Text),
+            "user_openid" .= ("USEROPENID1" :: Text),
             "username" .= ("小红" :: Text),
             "bot" .= False
           ],
@@ -316,19 +318,36 @@ spec = do
       fmap frameOp (parseGatewayFrame "{\"op\":1,\"d\":1337}") `shouldBe` Right 1
       fmap frameOp (parseGatewayFrame "{\"op\":0,\"s\":42,\"t\":\"READY\",\"d\":{}}") `shouldBe` Right 0
 
+    -- Every gateway frame is {"op": n, "d": {...}}.  A payload sent without
+    -- that envelope is not a frame the platform reads: it never answers, never
+    -- sends Hello, and closes the socket once the session has expired.
+    it "wraps identify in its opcode envelope" $
+      parseEither (withObject "identify" (\o -> o .: "op")) (identifyPayload "TOKEN" 1)
+        `shouldBe` Right (2 :: Int)
+
     it "presents the token the way the gateway expects it" $
-      parseEither (withObject "identify" (\o -> o .: "token")) (identifyPayload "TOKEN" 1)
+      parseEither
+        (withObject "identify" (\o -> o .: "d" >>= withObject "payload" (\d -> d .: "token")))
+        (identifyPayload "TOKEN" 1)
         `shouldBe` Right ("QQBot TOKEN" :: Text)
 
     it "asks for exactly one shard" $
-      parseEither (withObject "identify" (\o -> o .: "shard")) (identifyPayload "TOKEN" 1)
+      parseEither
+        (withObject "identify" (\o -> o .: "d" >>= withObject "payload" (\d -> d .: "shard")))
+        (identifyPayload "TOKEN" 1)
         `shouldBe` Right ([0, 1] :: [Int])
 
     it "carries the last sequence number on a heartbeat" $
       heartbeatPayload (Just 1337) `shouldBe` object ["op" .= (1 :: Int), "d" .= (1337 :: Int64)]
 
+    it "wraps resume in its opcode envelope" $
+      parseEither (withObject "resume" (\o -> o .: "op")) (resumePayload "TOKEN" "session-1" 99)
+        `shouldBe` Right (6 :: Int)
+
     it "resumes with the sequence number this process last handled" $
-      parseEither (withObject "resume" (\o -> o .: "seq")) (resumePayload "TOKEN" "session-1" 99)
+      parseEither
+        (withObject "resume" (\o -> o .: "d" >>= withObject "payload" (\d -> d .: "seq")))
+        (resumePayload "TOKEN" "session-1" 99)
         `shouldBe` Right (99 :: Int64)
 
     it "splits the address into what the socket needs" $ do
@@ -449,6 +468,11 @@ spec = do
 
     it "reports the owner count instead of the openids" $
       show cfg `shouldContain` "1 openid(s)"
+
+    it "exchanges credentials on the host the platform uses for both deployments" $
+      -- The token endpoint is not on the deployment host: addressing the sandbox
+      -- host for it answers 404 "unsupported call".
+      qqOfficialTokenHost `shouldBe` "https://api.bot.qq.com"
 
     it "addresses the sandbox and production as separate deployments" $ do
       qqOfficialApiBase cfg `shouldBe` "https://api.bot.qq.com"

@@ -764,7 +764,10 @@ groupPassiveWindowSeconds = 240
 directPassiveWindowSeconds :: NominalDiffTime
 directPassiveWindowSeconds = 3300
 
--- | Error codes meaning the answer's window has closed.
+-- | Error codes meaning the answer's window has closed: @304103@ and
+-- @40034005@ are the expiry itself, and @40034128@ is the platform counting the
+-- five replies per group message.  Each is answered once more as an ordinary
+-- message, which is what the user would read if the answer arrived late.
 passiveWindowExpiredCodes :: [Int]
 passiveWindowExpiredCodes = [40034128, 304103, 40034005]
 

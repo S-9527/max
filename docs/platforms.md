@@ -150,7 +150,9 @@ literal such as `@Maxwell`.
 
 ## QQ official bot (`qqofficial`)
 
-The open platform's own bot, reached at `api.bot.qq.com`. It is a **separate
+The open platform's own bot, reached at the platform's single request host
+`api.bot.qq.com` (`sandbox.api.bot.qq.com` for the sandbox, which is a separate
+deployment chosen by the credential rather than by the host). It is a **separate
 platform**, not another QQ edge: a OneBot endpoint and an official bot endpoint
 are different accounts, and the official one addresses people by openid rather
 than by number. Both can be configured at once; nothing is shared but the
