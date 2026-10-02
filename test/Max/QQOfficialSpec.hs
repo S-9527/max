@@ -62,7 +62,7 @@ groupAtEvent =
       "message_scene"
         .= object
           [ "source" .= ("default" :: Text),
-            "ext" .= [("msg_idx=REFIDX_xxx==" :: Text), ("auth_token=yyy" :: Text)]
+            "ext" .= ["msg_idx=REFIDX_xxx==" :: Text, "auth_token=yyy" :: Text]
           ]
     ]
 
@@ -202,7 +202,7 @@ utcStamp = formatTime defaultTimeLocale "%Y-%m-%d %H:%M:%S"
 -- actually has, which is whether the rendered text carries the secret anywhere.
 shouldNotCarry :: String -> String -> Expectation
 shouldNotCarry haystack needle =
-  (T.isInfixOf (T.pack needle) (T.pack haystack)) `shouldBe` False
+  T.isInfixOf (T.pack needle) (T.pack haystack) `shouldBe` False
 
 spec :: Spec
 spec = do

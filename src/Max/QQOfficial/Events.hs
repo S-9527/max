@@ -25,6 +25,8 @@ where
 
 import Control.Applicative ((<|>))
 import Data.Aeson (Value (..))
+import Data.Char (isDigit)
+import Data.Either (fromRight)
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.Aeson.Types (Parser, parseMaybe, withObject, (.:?), (.!=))
@@ -341,7 +343,7 @@ qqOfficialTimestamp raw
               then (T.dropEnd 1 stripped, "+00:00")
               else splitOffset stripped
           (whole, _fraction) = T.breakOn "." naive
-          minutes = either (const 0) id (parseOffset offsetText)
+          minutes = fromRight 0 (parseOffset offsetText)
        in case parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%S" (T.unpack whole) of
             Nothing -> Left ("unrecognised timestamp: " <> raw)
             Just local -> Right (localTimeToUTC (minutesToTimeZone minutes) local)
@@ -369,12 +371,14 @@ parseOffset text = case T.uncons text of
       let compact = T.filter (/= ':') digits
           hours = T.take 2 compact
           minutes = T.drop 2 compact
-          acceptable = T.length hours == 2 && T.all isDigit hours && all (\part -> T.null part || (T.length part == 2 && T.all isDigit part)) [minutes]
+          acceptable =
+            T.length hours == 2
+              && T.all isDigit hours
+              && (\part -> T.null part || (T.length part == 2 && T.all isDigit part)) minutes
        in if acceptable
             then Right (digitsOf hours * 60 + (if T.null minutes then 0 else digitsOf minutes))
             else Left ("bad offset: " <> text)
     digitsOf = T.foldl' (\acc c -> acc * 10 + fromEnum c - fromEnum '0') (0 :: Int)
-    isDigit c = c >= '0' && c <= '9'
 
 stringField :: Text -> Value -> Maybe Text
 stringField name value = case objectField name value of

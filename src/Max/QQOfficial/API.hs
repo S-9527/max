@@ -24,7 +24,7 @@ module Max.QQOfficial.API
   )
 where
 
-import Control.Concurrent.STM (TVar, atomically, newTVarIO, readTVar, writeTVar)
+import Control.Concurrent.STM (TVar, atomically, newTVarIO, readTVarIO, writeTVar)
 import Data.Aeson (Value (..), eitherDecodeStrict', encode, object, (.=))
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
@@ -71,7 +71,7 @@ invalidateToken (TokenCache ref) = atomically (writeTVar ref Nothing)
 currentToken :: HttpRuntime -> QQOfficialConfig -> TokenCache -> IO (Either Text Text)
 currentToken runtime cfg cache = do
   now <- getCurrentTime
-  cached <- atomically (readTVar ref)
+  cached <- readTVarIO ref
   case cached of
     Just token | token.cachedTokenValidUntil > addUTCTime refreshMargin now ->
       pure (Right token.cachedToken)

@@ -100,7 +100,7 @@ import Network.WebSockets
 import Network.WebSockets qualified as WS
 import OneBot.Types (GroupId (..))
 import System.Timeout (timeout)
-import Wuss qualified as Wuss
+import Wuss qualified
 
 --------------------------------------------------------------------------------
 -- Runtime state
@@ -557,7 +557,7 @@ ingestMessage runtime scheduler ingress ctx name payload = case qqOfficialEvent 
     received <- liftIO getCurrentTime
     -- A message the bot sent itself is a delivery echo at best; recording a
     -- passive window for one would let Max answer itself.
-    unless (event.qoeSenderIsSelf) $
+    unless event.qoeSenderIsSelf $
       liftIO (rememberWindow runtime event.qoeNativeEventId (PassiveWindow event.qoeMessageId received))
     forM_ scheduler $ \sched -> liftIO (bumpEpisode sched (GroupId legacy))
     let -- Our own messages carry the application id as their sender, which is

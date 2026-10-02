@@ -218,7 +218,7 @@ mergeChunksToBudget budget chunks
       (group, remaining)
         -- Folding two parts produces one part, so its text runs merge: the
         -- merged chunk is what the platform receives as a single string.
-        | length group == count, all textLikeNode (concat group) -> Just (mergeText (concat group) : remaining)
+        | length group == count, all (all textLikeNode) group -> Just (mergeText (concat group) : remaining)
         | otherwise -> Nothing
 
     textLikeNode = \case

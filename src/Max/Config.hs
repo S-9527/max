@@ -279,7 +279,7 @@ validateConfig cfg =
       nonempty "qqofficial.app_id" qqCfg.qoAppId
         <> nonempty "qqofficial.app_secret" qqCfg.qoAppSecret
         <> invalid "qqofficial.intents" (qqCfg.qoIntents == 0)
-        <> invalid "qqofficial.owners" (any T.null (map T.strip qqCfg.qoOwners))
+        <> invalid "qqofficial.owners" (any (T.null . T.strip) qqCfg.qoOwners)
     validateIntent intentCfg =
       concat
         [ invalid "intent.cooldown_seconds" (intentCfg.icCooldownSeconds < 0),

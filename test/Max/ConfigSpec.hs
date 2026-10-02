@@ -189,7 +189,7 @@ spec = describe "startup configuration" $ do
       hPutStr
         handle
         ( qqYaml
-            "app_id: \"102000000\"\napp_secret: s\nsandbox: true\nowners: [\"OPENID1\"]\nbot_name: \"小鲨\"\n"
+            "app_id: \"102000000\"\napp_secret: s\nsandbox: true\nowners: [\"OPENID1\"]\nbot_name: \"Max\"\n"
         )
       hClose handle
       config <- withArgs ["--config-file", path] loadConfig
@@ -201,7 +201,7 @@ spec = describe "startup configuration" $ do
               qoApiBase = Nothing,
               qoSandbox = True,
               qoIntents = qqOfficialGatewayIntents,
-              qoBotName = "小鲨",
+              qoBotName = "Max",
               qoOwners = ["OPENID1"],
               qoFullGroupMessages = False
             }
@@ -222,4 +222,6 @@ spec = describe "startup configuration" $ do
 -- | The smallest config that loads, plus whatever a test adds under
 -- @qqofficial@.
 qqYaml :: String -> String
-qqYaml section = "llm:\n  default: main\n  profiles:\n    main:\n      api_key: test-key\nqqofficial:\n  " <> section
+qqYaml section =
+  "llm:\n  default: main\n  profiles:\n    main:\n      api_key: test-key\nqqofficial:\n"
+    <> unlines (map ("  " <>) (lines section))
