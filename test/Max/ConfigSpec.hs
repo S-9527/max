@@ -5,6 +5,7 @@ import Max.Admin (AdminConfig (..))
 import Max.Config
 import Max.Http.Json (replyRetryDelaysSecs)
 import Max.ModelCatalog
+import Max.QQOfficial.Types (QQOfficialConfig (..), qqOfficialGatewayIntents)
 import Max.Task.Policy (frontendDeadlineSeconds, taskDeadlineSeconds)
 import Max.Tools.Search (SearchConfig (..))
 import System.Environment (withArgs)
@@ -171,3 +172,54 @@ spec = describe "startup configuration" $ do
       config <- loadConfig
       validateConfig (config {lingoProfile = Just "default", memoryExtractProfile = Nothing}) `shouldContain` ["lingo.profile"]
       validateConfig (config {lingoProfile = Just "default", memoryExtractProfile = Just "default"}) `shouldNotContain` ["lingo.profile"]
+  it "leaves the QQ official bot off until an app id is configured" $
+    withSystemTempFile "max-qqofficial.yaml" $ \path handle -> do
+      hPutStr handle (qqYaml "")
+      hClose handle
+      config <- withArgs ["--config-file", path] loadConfig
+      fmap qoAppId config.qqofficial `shouldBe` Nothing
+  it "enables the QQ official bot when an app id is configured" $
+    withSystemTempFile "max-qqofficial.yaml" $ \path handle -> do
+      hPutStr handle (qqYaml "app_id: \"102000000\"\napp_secret: s\n")
+      hClose handle
+      config <- withArgs ["--config-file", path] loadConfig
+      fmap qoAppId config.qqofficial `shouldBe` Just "102000000"
+  it "reads the QQ official bot settings from YAML" $
+    withSystemTempFile "max-qqofficial.yaml" $ \path handle -> do
+      hPutStr
+        handle
+        ( qqYaml
+            "app_id: \"102000000\"\napp_secret: s\nsandbox: true\nowners: [\"OPENID1\"]\nbot_name: \"小鲨\"\n"
+        )
+      hClose handle
+      config <- withArgs ["--config-file", path] loadConfig
+      config.qqofficial
+        `shouldBe` Just
+          QQOfficialConfig
+            { qoAppId = "102000000",
+              qoAppSecret = "s",
+              qoApiBase = Nothing,
+              qoSandbox = True,
+              qoIntents = qqOfficialGatewayIntents,
+              qoBotName = "小鲨",
+              qoOwners = ["OPENID1"],
+              qoFullGroupMessages = False
+            }
+  it "rejects QQ official settings that cannot authenticate" $
+    -- A bot without a secret has nothing to exchange for an access token, and
+    -- an intent word of zero identifies against nothing; both are reported at
+    -- startup rather than as a gateway that never connects.
+    withSystemTempFile "max-qqofficial.yaml" $ \path handle -> do
+      hPutStr handle (qqYaml "app_id: \"102000000\"\n")
+      hClose handle
+      withArgs ["--config-file", path] loadConfig `shouldThrow` anyIOException
+  it "rejects QQ official settings that cannot connect" $
+    withSystemTempFile "max-qqofficial.yaml" $ \path handle -> do
+      hPutStr handle (qqYaml "app_id: \"102000000\"\napp_secret: s\nintents: 0\n")
+      hClose handle
+      withArgs ["--config-file", path] loadConfig `shouldThrow` anyIOException
+
+-- | The smallest config that loads, plus whatever a test adds under
+-- @qqofficial@.
+qqYaml :: String -> String
+qqYaml section = "llm:\n  default: main\n  profiles:\n    main:\n      api_key: test-key\nqqofficial:\n  " <> section
