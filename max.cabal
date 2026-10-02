@@ -762,8 +762,8 @@ test-suite max-test
         Max.EpisodeStoreSpec
         Max.MCP.ClientSpec
         Max.PlatformSpec
-        Max.QQOfficialSpec
         Max.Platform.DeliverySpec
+        Max.QQOfficialSpec
         Max.PromptFlowSpec
         PromptFlow
         Max.EpisodeSchedulerSpec
